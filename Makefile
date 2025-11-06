@@ -1,7 +1,7 @@
 CC := cc
 CFLAGS := -Wall -Wextra -std=c99
 
-# Optimization flags
+# Vectoring optimization flags
 CFLAGS += -Ofast -ffast-math -funroll-loops -march=native -ftree-vectorize -Rpass=loop-vectorize
 
 LIBSQLITE_DIR := deps/sqlite-autoconf-3500400

@@ -1,4 +1,5 @@
 // TODO: 
+// - debug info and time calculations should be toggleable with compilation flags
 // - highlight children on hover
 //  - store multiple highlighted nodes and edges ids in graph state
 //  - on every frame do not free the highlighted arrays, just clear them and repopulate incresing their size if needed
@@ -14,6 +15,7 @@
 #define FILELIB_IMPLEMENTATION
 #include "file.h"
 #include <time.h>
+
 
 // window props
 #define WINDOW_WIDTH 1600
@@ -39,6 +41,44 @@
 static Vector2 PAN = {0.0f, 0.0f};
 static float ZOOM = 1.0f;
 
+// ----------------------------------------
+// Averaging window for performance metrics
+// ----------------------------------------
+#define AVG_WINDOW_SIZE 50
+
+typedef struct {
+    float values[AVG_WINDOW_SIZE];
+    int count;
+} AvgWindow;
+
+void add_to_avg_window(AvgWindow *window, float value) {
+    if (window->count < AVG_WINDOW_SIZE) {
+        window->values[window->count++] = value;
+        return;
+    }
+
+    // shift values to the left
+    for (int i = 1; i < AVG_WINDOW_SIZE; i++) {
+        window->values[i - 1] = window->values[i];
+    }
+
+    window->values[AVG_WINDOW_SIZE - 1] = value;
+}
+
+float get_avg_value(AvgWindow *window) {
+    if (window->count == 0) {
+        return 0.0f;
+    }
+
+    float sum = 0.0f;
+    for (int i = 0; i < window->count; i++) {
+        sum += window->values[i];
+    }
+
+    return sum / window->count;
+}
+// ----------------------------------------
+
 typedef struct {
     bool triggered;
     int node_id;
@@ -48,15 +88,34 @@ typedef struct {
     int hovered_node_id;
     bool panning;
     float zoom_delta;
+    AvgWindow t_draw;
+    AvgWindow t_update;
+    AvgWindow t_frame;
     StateDragging dragging;
-} State;
+} FrameState;
 
-State frame_init_state(State *state) {
-    if (!state) {
-        return (State){-1, false, 0., {false, -1}};
+FrameState new_frame_state(FrameState *prev_frame_state) {
+    if (!prev_frame_state) {
+        return (FrameState){
+            -1,
+            false,
+            0.,
+            {{0}, 0},
+            {{0}, 0},
+            {{0}, 0},
+            {false, -1},
+        };
     }
 
-    return (State){-1, state->panning, 0., state->dragging};
+    return (FrameState){
+        -1,
+        prev_frame_state->panning,
+        0.,
+        prev_frame_state-> t_draw,
+        prev_frame_state-> t_update,
+        prev_frame_state-> t_frame,
+        prev_frame_state->dragging,
+    };
 };
 
 typedef struct Node {
@@ -142,7 +201,7 @@ void draw_edge(Edge *edge, Color color) {
     DrawLine(pos_from.x, pos_from.y, arrowhead_point.x, arrowhead_point.y, color);
 }
 
-void draw_graph(Graph *graph, State *state) {
+void draw_graph(Graph *graph, FrameState *state) {
     for (int i = 0; i < graph->edge_count; i++) {
         Edge *edge = &graph->edges[i];
         draw_edge(edge, ELEMENT_COLOR);
@@ -174,15 +233,37 @@ bool is_inside_node(Node *node, int x, int y) {
     return (dx * dx + dy * dy) <= (radius * radius);
 }
 
-void draw_fps(int posX, int posY, Color color) {
+void draw_debug_info(int posX, int posY, Color color, FrameState *state) {
+    const int height = 20;
+    const int margin = 5;
+
     int fps = GetFPS();
-    char buffer[32];
-    snprintf(buffer, sizeof(buffer), "%d FPS", fps);
-    DrawText(buffer, posX, posY, 20, color);
+    char buffer_fps[32];
+    snprintf(buffer_fps, sizeof(buffer_fps), "%d FPS", fps);
+    DrawText(buffer_fps, posX, posY, height, color);
+
+    float avg_update_ms = get_avg_value(&state->t_update);
+    char buffer_update[32];
+    snprintf(buffer_update, sizeof(buffer_update), "%.2f TUPDATEAVGMS", avg_update_ms);
+    posY += height + margin;
+    DrawText(buffer_update, posX, posY, height, color);
+
+    float avg_draw_ms = get_avg_value(&state->t_draw);
+    char buffer_draw[32];
+    snprintf(buffer_draw, sizeof(buffer_draw), "%.2f TDRAWAVGMS", avg_draw_ms);
+    posY += height + margin;
+    DrawText(buffer_draw, posX, posY, height, color);
+
+    float avg_frame_ms = get_avg_value(&state->t_frame);
+    char buffer_frame[32];
+    snprintf(buffer_frame, sizeof(buffer_frame), "%.2f TFRAMEAVGMS", avg_frame_ms);
+    posY += height + margin;
+    DrawText(buffer_frame, posX, posY, height, color);
+
 }
 
-void compute_state(Graph *g, State *state) {
-    *state = frame_init_state(state);
+void compute_state(Graph *g, FrameState *state) {
+    *state = new_frame_state(state);
 
     if (state->panning) {
         if (IsMouseButtonUp(MOUSE_BUTTON_MIDDLE)) {
@@ -220,7 +301,7 @@ void compute_state(Graph *g, State *state) {
     }
 }
 
-void draw_cursor(State *state) {
+void draw_cursor(FrameState *state) {
     SetMouseCursor(MOUSE_CURSOR_DEFAULT);
     if (state->hovered_node_id != -1) {
         SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
@@ -230,7 +311,7 @@ void draw_cursor(State *state) {
     }
 }
 
-void apply_forces(Graph *g, State *state) {
+void apply_forces(Graph *g, FrameState *state) {
     for (int i = 0; i < g->node_count; i++) {
         // skipp updating dragged node
         if (state->dragging.triggered && i == state->dragging.node_id) {
@@ -276,7 +357,7 @@ void apply_forces(Graph *g, State *state) {
     }
 }
  // how many edges allocated
-void update_graph(Graph *g, State *state) {
+void update_graph(Graph *g, FrameState *state) {
     apply_forces(g, state);
 
     // handle pan
@@ -369,23 +450,40 @@ int main() {
     srand((unsigned)time(NULL));
 
     Graph g = create_random_graph(NODE_COUNT, EDGE_COUNT);
-    State state = frame_init_state(NULL);
+    FrameState state = new_frame_state(NULL);
 
     while (!WindowShouldClose()) {
+        double t_frame_start = GetTime();
         BeginDrawing();
-
         ClearBackground(DARKGRAY);
 
+        double t_update_start = GetTime();
         compute_state(&g, &state);
+        double t_update_end = GetTime();
+        double update_ms = (t_update_end - t_update_start) * 1000.0;
 
+        double t_draw_start = GetTime();
         draw_graph(&g, &state);
         draw_cursor(&state);
+        double t_draw_end = GetTime();
+        double draw_ms = (t_draw_end - t_draw_start) * 1000.0;
 
+        float t_update_start_2 = GetTime();
         update_graph(&g, &state);
+        double t_update_end_2 = GetTime();
+        update_ms += (t_update_end_2 - t_update_start_2) * 1000.0;
+        add_to_avg_window(&state.t_update, update_ms);
 
-        draw_fps(5, 5, ELEMENT_COLOR_HOVER);
+        double t_draw_start_2 = GetTime();
+        draw_debug_info(5, 5, ELEMENT_COLOR_HOVER, &state);
+        double t_draw_end_2 = GetTime();
+        draw_ms += (t_draw_end_2 - t_draw_start_2) * 1000.0;
+        add_to_avg_window(&state.t_draw, draw_ms);
 
         EndDrawing();
+        double t_frame_end = GetTime();
+        double frame_ms = (t_frame_end - t_frame_start) * 1000.0;
+        add_to_avg_window(&state.t_frame, frame_ms);
     }
 
     free(g.nodes);
