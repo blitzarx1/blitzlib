@@ -1,0 +1,7 @@
+CompileFlags:
+  Add:
+    - -I./deps/sqlite-autoconf-3500400
+    - -I./deps/raylib-5.5_macos/include
+    - -std=c99
+    - -Wall
+    - -Wextra
